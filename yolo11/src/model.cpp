@@ -463,7 +463,7 @@ static nvinfer1::IElementWiseLayer* Proto(nvinfer1::INetworkDefinition* network,
                                                      weightMap["model.23.proto.upsample.bias"]);
     assert(convTranpsose);
     convTranpsose->setStrideNd(nvinfer1::DimsHW{2, 2});
-    convTranpsose->setPadding(nvinfer1::DimsHW{0, 0});
+    convTranpsose->setPaddingNd(nvinfer1::DimsHW{0, 0});
     auto cv2 =
             convBnSiLU(network, weightMap, *convTranpsose->getOutput(0), mid_channel, {3, 3}, 1, "model.23.proto.cv2");
     auto cv3 = convBnSiLUProto(network, weightMap, *cv2->getOutput(0), 32, 1, 1, 0, "model.23.proto.cv3");
