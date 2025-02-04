@@ -106,9 +106,11 @@ void deserialize_engine(std::string& engine_name, IRuntime** runtime, ICudaEngin
 void prepare_buffer(ICudaEngine* engine, float** input_buffer_device, float** output_buffer_device,
                     float** output_seg_buffer_device, float** output_buffer_host, float** output_seg_buffer_host,
                     float** decode_ptr_host, float** decode_ptr_device, std::string cuda_post_process) {
-    assert(engine->getNbBindings() == 3);
+    assert(engine->getNbIOTensors() == 3);
     // In order to bind the buffers, we need to know the names of the input and output tensors.
     // Note that indices are guaranteed to be less than IEngine::getNbBindings()
+    
+    /*
     const int inputIndex = engine->getBindingIndex(kInputTensorName);
     const int outputIndex = engine->getBindingIndex(kOutputTensorName);
     const int outputIndex_seg = engine->getBindingIndex("proto");
@@ -116,6 +118,13 @@ void prepare_buffer(ICudaEngine* engine, float** input_buffer_device, float** ou
     assert(inputIndex == 0);
     assert(outputIndex == 1);
     assert(outputIndex_seg == 2);
+    */
+
+    assert(engine->getTensorIOMode(kInputTensorName) == nvinfer1::TensorIOMode::kINPUT);
+    assert(engine->getTensorIOMode(kOutputTensorName) == nvinfer1::TensorIOMode::kOUTPUT);
+    assert(engine->getTensorIOMode("proto") == nvinfer1::TensorIOMode::kOUTPUT);
+    
+    
     // Create GPU buffers on device
     CUDA_CHECK(cudaMalloc((void**)input_buffer_device, kBatchSize * 3 * kInputH * kInputW * sizeof(float)));
     CUDA_CHECK(cudaMalloc((void**)output_buffer_device, kBatchSize * kOutputSize * sizeof(float)));
@@ -140,19 +149,24 @@ void infer(IExecutionContext& context, cudaStream_t& stream, void** buffers, flo
            std::string cuda_post_process) {
     // infer on the batch asynchronously, and DMA output back to host
     auto start = std::chrono::system_clock::now();
-    context.enqueueV2(buffers, stream, nullptr);
+
+    context.setTensorAddress(kInputTensorName, buffers[0]);
+    context.setTensorAddress(kOutputTensorName, buffers[1]);
+    context.setTensorAddress("proto", buffers[2]);
+
+    context.enqueueV3(stream);
     if (cuda_post_process == "c") {
 
-        std::cout << "kOutputSize:" << kOutputSize << std::endl;
+        //std::cout << "kOutputSize:" << kOutputSize << std::endl;
         CUDA_CHECK(cudaMemcpyAsync(output, buffers[1], batchsize * kOutputSize * sizeof(float), cudaMemcpyDeviceToHost,
                                    stream));
-        std::cout << "kOutputSegSize:" << kOutputSegSize << std::endl;
+        //std::cout << "kOutputSegSize:" << kOutputSegSize << std::endl;
         CUDA_CHECK(cudaMemcpyAsync(output_seg, buffers[2], batchsize * kOutputSegSize * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
 
         auto end = std::chrono::system_clock::now();
-        std::cout << "inference time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
-                  << "ms" << std::endl;
+        //std::cout << "inference time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+        //          << "ms" << std::endl;
     } else if (cuda_post_process == "g") {
         CUDA_CHECK(
                 cudaMemsetAsync(decode_ptr_device, 0, sizeof(float) * (1 + kMaxNumOutputBbox * bbox_element), stream));
@@ -253,7 +267,7 @@ int main(int argc, char** argv) {
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
     cuda_preprocess_init(kMaxInputImageSize);
-    auto out_dims = engine->getBindingDimensions(1);
+    auto out_dims = engine->getTensorShape(kOutputTensorName);
     model_bboxes = out_dims.d[0];
     // Prepare cpu and gpu buffers
     float* device_buffers[3];
@@ -276,6 +290,8 @@ int main(int argc, char** argv) {
     prepare_buffer(engine, &device_buffers[0], &device_buffers[1], &device_buffers[2], &output_buffer_host,
                    &output_seg_buffer_host, &decode_ptr_host, &decode_ptr_device, cuda_post_process);
 
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int image_count = 0;
     // // batch predict
     for (size_t i = 0; i < file_names.size(); i += kBatchSize) {
         // Get a batch of images
@@ -283,6 +299,7 @@ int main(int argc, char** argv) {
         std::vector<std::string> img_name_batch;
         for (size_t j = i; j < i + kBatchSize && j < file_names.size(); j++) {
             cv::Mat img = cv::imread(img_dir + "/" + file_names[j]);
+            image_count++;
             img_batch.push_back(img);
             img_name_batch.push_back(file_names[j]);
         }
@@ -299,8 +316,8 @@ int main(int argc, char** argv) {
                 auto& res = res_batch[b];
                 cv::Mat img = img_batch[b];
                 auto masks = process_mask(&output_seg_buffer_host[b * kOutputSegSize], kOutputSegSize, res);
-                draw_mask_bbox(img, res, masks, labels_map);
-                cv::imwrite("_" + img_name_batch[b], img);
+                //draw_mask_bbox(img, res, masks, labels_map);
+                //cv::imwrite("_" + img_name_batch[b], img);
             }
         } else if (cuda_post_process == "g") {
             // Process gpu decode and nms results
@@ -309,6 +326,13 @@ int main(int argc, char** argv) {
             std::cerr << "seg_postprocess is not support in gpu right now" << std::endl;
         }
     }
+
+    auto elapsed_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::high_resolution_clock::now() - start_time)
+            .count();
+
+    std::cout << "Total time: " << elapsed_time_ms << "ms" << std::endl;
+    std::cout << "Total images: " << image_count << std::endl;
 
     // Release stream and buffers
     cudaStreamDestroy(stream);
